@@ -13,7 +13,7 @@ Paperclip is a multi-agent software development platform. This fork extends it w
 
 ## Vault Context
 
-The project knowledge base (Obsidian vault) is at `/home/paperclip/vault/Claude-Knowledge/`.
+The project knowledge base (Obsidian vault) is at `/home/paperclip/vault/`.
 
 Start here for full context:
 - `Main Index.md` — complete map of the AI Software Factory system, all connected documents, and current gaps
