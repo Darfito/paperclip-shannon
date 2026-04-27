@@ -1131,6 +1131,7 @@ const issueListSelect = {
   `,
   status: issues.status,
   priority: issues.priority,
+  pipelineStage: issues.pipelineStage,
   assigneeAgentId: issues.assigneeAgentId,
   assigneeUserId: issues.assigneeUserId,
   checkoutRunId: issues.checkoutRunId,
