@@ -96,8 +96,69 @@ Do not overwrite the **Name** or **Technical Context** fields already set by ini
 
 ---
 
-## Step 6 — Post completion comment
+## Step 6 — Start local Supabase
+
+Set up and start the local Supabase stack via Docker. This gives the project a real local database with a real API URL and anon key — no Supabase cloud account needed.
+
+**6a — Verify Docker is available**
+
+```bash
+docker ps
+```
+
+If this fails with a permission error, stop and post a comment on the issue:
+> "⚠️ Docker is not accessible. Ask the server operator to run: `sudo usermod -aG docker paperclip` then restart the server. Cannot start local Supabase without Docker."
+
+Do not continue past this point until Docker is accessible.
+
+**6b — Install Supabase CLI**
+
+```bash
+npx supabase --version 2>/dev/null || npm install supabase --save-dev
+```
+
+**6c — Initialize Supabase if not already done**
+
+Check if `supabase/config.toml` exists. If not:
+
+```bash
+npx supabase init
+```
+
+**6d — Start the local stack**
+
+```bash
+npx supabase start
+```
+
+This pulls Docker images on first run (may take a few minutes). Wait for it to complete. It outputs the local API URL, anon key, and service role key.
+
+**6e — Write real credentials to `.env.local`**
+
+Parse the output of `npx supabase status` and write to `.env.local`:
+
+```bash
+npx supabase status
+```
+
+Extract:
+- `API URL` → `NEXT_PUBLIC_SUPABASE_URL`
+- `anon key` → `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `service_role key` → `SUPABASE_SERVICE_ROLE_KEY` (server-only, never expose to client)
+
+Write `.env.local`:
+```
+NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321
+NEXT_PUBLIC_SUPABASE_ANON_KEY=<real anon key from status output>
+SUPABASE_SERVICE_ROLE_KEY=<real service role key from status output>
+```
+
+Never use placeholder values. If `supabase start` failed, do not write the file — post the blocker comment instead.
+
+---
+
+## Step 7 — Post completion comment
 
 After writing all files, post a comment on the issue:
 
-> "Foundation documented. Files updated: [list]. Next step: run `foundation--plan` to plan features and create the backlog."
+> "Foundation documented. Local Supabase running at http://127.0.0.1:54321. Files updated: [list]. Next step: run `foundation--plan` to plan features and create the backlog."

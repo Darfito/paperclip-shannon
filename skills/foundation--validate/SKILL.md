@@ -48,7 +48,18 @@ Based on `project-config.json`, verify init generated the expected files:
 **Always expected:**
 - [ ] `src/app/(auth)/callback/route.ts`
 - [ ] `src/lib/auth/server.ts`
+- [ ] `supabase/config.toml` exists (Supabase initialized)
 - [ ] `supabase/migrations/` has at least one migration file
+- [ ] `.env.local` exists and does NOT contain `placeholder` values
+
+**Check local Supabase is running:**
+
+```bash
+npx supabase status
+```
+
+- [ ] Local stack is running (API URL, anon key are shown)
+- [ ] If not running: note as ⚠️ and include `npx supabase start` in the fix list
 
 **When `authModel: "supabase-auth"`:**
 - [ ] `src/app/(auth)/login/page.tsx`

@@ -81,7 +81,7 @@ If the migration renames or drops columns or tables, scan `src/` for references 
 
 ---
 
-## Step 6 — Write files and update state
+## Step 6 — Write files, update state, and apply migration
 
 Write:
 - Migration to `supabase/migrations/{timestamp}_{feature-name}.sql`
@@ -93,6 +93,14 @@ Read `.claude/docs/project-state.md` and update:
 - **Feature Timeline:** set the `architecture` column to today's date
 
 Write the updated `project-state.md`.
+
+**Apply the migration to the local Supabase:**
+
+```bash
+npx supabase db reset
+```
+
+This replays all migrations from scratch against the local Docker stack — the local database is now in sync with the schema. If `db reset` fails, include the error in the completion comment as a warning.
 
 ---
 
