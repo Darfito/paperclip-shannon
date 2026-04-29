@@ -9,6 +9,7 @@ import {
   ISSUE_THREAD_INTERACTION_CONTINUATION_POLICIES,
   ISSUE_THREAD_INTERACTION_KINDS,
   ISSUE_THREAD_INTERACTION_STATUSES,
+  PIPELINE_STAGES,
 } from "../constants.js";
 import { multilineTextSchema } from "./text.js";
 
@@ -134,6 +135,7 @@ export const createIssueSchema = z.object({
   description: multilineTextSchema.optional().nullable(),
   status: z.enum(ISSUE_STATUSES).optional().default("backlog"),
   priority: z.enum(ISSUE_PRIORITIES).optional().default("medium"),
+  pipelineStage: z.enum(PIPELINE_STAGES).optional().nullable(),
   assigneeAgentId: z.string().uuid().optional().nullable(),
   assigneeUserId: z.string().optional().nullable(),
   requestDepth: z.number().int().nonnegative().optional().default(0),

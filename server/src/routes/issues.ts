@@ -29,6 +29,8 @@ import {
   updateIssueSchema,
   getClosedIsolatedExecutionWorkspaceMessage,
   isClosedIsolatedExecutionWorkspace,
+  PIPELINE_STAGES,
+  type PipelineStage,
   type ExecutionWorkspace,
 } from "@paperclipai/shared";
 import { trackAgentTaskCompleted } from "@paperclipai/shared/telemetry";
@@ -397,6 +399,19 @@ export function issueRoutes(
     pluginWorkerManager?: PluginWorkerManager;
   } = {},
 ) {
+  // Parse Shannon pipeline NEXT_COMMAND: markers from agent comments.
+  // Format: NEXT_COMMAND: stage=<stage>[,assignee=<agent_uuid>]
+  function parseNextCommand(body: string): { stage: PipelineStage; assigneeAgentId?: string } | null {
+    const match = body.match(/NEXT_COMMAND:\s*stage=([\w]+)(?:,assignee=([\w-]+))?/);
+    if (!match) return null;
+    const stage = match[1] as string;
+    if (!(PIPELINE_STAGES as readonly string[]).includes(stage)) return null;
+    return {
+      stage: stage as PipelineStage,
+      ...(match[2] ? { assigneeAgentId: match[2] } : {}),
+    };
+  }
+
   const router = Router();
   const svc = issueService(db);
   const access = accessService(db);
@@ -3413,6 +3428,48 @@ export function issueRoutes(
       runId: actor.runId,
     });
     await issueReferencesSvc.syncComment(comment.id);
+
+    // Shannon pipeline: advance stage and reassign when agent posts NEXT_COMMAND:
+    if (actor.actorType === "agent") {
+      const nextCmd = parseNextCommand(req.body.body);
+      if (nextCmd) {
+        const pipelinePatch: Record<string, unknown> = { pipelineStage: nextCmd.stage };
+        if (nextCmd.assigneeAgentId) {
+          pipelinePatch.assigneeAgentId = nextCmd.assigneeAgentId;
+          pipelinePatch.status = "todo";
+        }
+        const advanced = await svc.update(id, pipelinePatch);
+        if (advanced && nextCmd.assigneeAgentId) {
+          void queueIssueAssignmentWakeup({
+            heartbeat,
+            issue: { id: advanced.id, assigneeAgentId: advanced.assigneeAgentId, status: advanced.status },
+            reason: "pipeline_stage_advanced",
+            mutation: "next_command",
+            contextSource: "issue_comment_next_command",
+            requestedByActorType: "agent",
+            requestedByActorId: actor.actorId,
+          });
+          await logActivity(db, {
+            companyId: currentIssue.companyId,
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            agentId: actor.agentId,
+            runId: actor.runId,
+            action: "issue.pipeline_advanced",
+            entityType: "issue",
+            entityId: id,
+            details: {
+              pipelineStage: nextCmd.stage,
+              assigneeAgentId: nextCmd.assigneeAgentId,
+              identifier: currentIssue.identifier,
+              source: "next_command",
+            },
+          });
+          currentIssue = advanced;
+        }
+      }
+    }
+
     const commentReferenceSummaryAfter = await issueReferencesSvc.listIssueReferenceSummary(currentIssue.id);
     const commentReferenceDiff = issueReferencesSvc.diffIssueReferenceSummary(
       commentReferenceSummaryBefore,

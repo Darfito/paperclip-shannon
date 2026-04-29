@@ -66,6 +66,25 @@ export const AGENT_ROLE_LABELS: Record<AgentRole, string> = {
   general: "General",
 };
 
+export const PIPELINE_STAGES = [
+  "spec",
+  "design",
+  "implementation",
+  "sandboxed",
+  "tested",
+  "shipped",
+] as const;
+export type PipelineStage = (typeof PIPELINE_STAGES)[number];
+
+export const PIPELINE_STAGE_LABELS: Record<PipelineStage, string> = {
+  spec: "Spec",
+  design: "Design",
+  implementation: "Implementation",
+  sandboxed: "Sandboxed",
+  tested: "Tested",
+  shipped: "Shipped",
+};
+
 export const AGENT_DEFAULT_MAX_CONCURRENT_RUNS = 5;
 export const WORKSPACE_BRANCH_ROUTINE_VARIABLE = "workspaceBranch";
 export const AGENT_ICON_NAMES = [
