@@ -41,14 +41,22 @@ Before dispatching any workers, the SWE Lead must have:
 
 ## Dispatch script
 
-Workers run via `claude -p` (Claude Code print mode) — no API key required, uses the subscription credentials already configured on the server. Each worker is a one-shot subprocess call run in parallel.
+Workers call the Anthropic API directly using `WORKER_API_KEY` — a separate key from the orchestrator's `claude login` credentials so Claude Code does not pick it up as agent auth. Set `WORKER_API_KEY=sk-ant-...` as an environment variable on the SWE Lead agent in Paperclip UI → Agent → Configuration → Environment variables.
 
 Write and execute the following Python script (adjust `TASKS` for your specific dispatch batch):
 
 ```python
 #!/usr/bin/env python3
-"""Worker dispatch — fan-out claude -p workers and collect results."""
-import asyncio, os, time
+"""Worker dispatch — fan-out Sonnet workers and collect results."""
+import asyncio, os, time, json
+import anthropic
+
+PAPERCLIP_API_URL = os.environ["PAPERCLIP_API_URL"]
+PAPERCLIP_API_KEY = os.environ["PAPERCLIP_API_KEY"]
+PAPERCLIP_AGENT_ID = os.environ["PAPERCLIP_AGENT_ID"]
+PAPERCLIP_COMPANY_ID = os.environ["PAPERCLIP_COMPANY_ID"]
+PAPERCLIP_TASK_ID = os.environ.get("PAPERCLIP_TASK_ID", "")
+WORKER_API_KEY = os.environ["WORKER_API_KEY"]
 
 # ── Configure tasks ────────────────────────────────────────────────────────────
 # Each task: { "id": str, "type": "code"|"design"|"test", "prompt": str }
@@ -70,39 +78,83 @@ Rules:
     # Add more tasks here
 ]
 
+MODEL = "claude-sonnet-4-6"
+# Sonnet 4.6 pricing (per token)
+INPUT_COST_PER_TOKEN  = 3.00 / 1_000_000   # $3.00 / MTok
+OUTPUT_COST_PER_TOKEN = 15.00 / 1_000_000  # $15.00 / MTok
+
+client = anthropic.AsyncAnthropic(api_key=WORKER_API_KEY)
+
 async def run_worker(task: dict) -> dict:
-    """Run one worker via claude -p and return its output."""
+    """Call one worker and return its output + usage."""
     start = time.time()
-    proc = await asyncio.create_subprocess_exec(
-        "claude", "-p", task["prompt"],
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    response = await client.messages.create(
+        model=MODEL,
+        max_tokens=4096,
+        messages=[{"role": "user", "content": task["prompt"]}],
     )
-    stdout, stderr = await proc.communicate()
-    elapsed = round(time.time() - start, 2)
-    output = stdout.decode().strip()
-    if proc.returncode != 0:
-        output = f"[ERROR] Worker failed:\n{stderr.decode().strip()}"
+    elapsed = time.time() - start
+    usage = response.usage
     return {
         "id": task["id"],
         "type": task["type"],
-        "output": output,
-        "elapsed_sec": elapsed,
-        "exit_code": proc.returncode,
+        "output": response.content[0].text,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cached_input_tokens": getattr(usage, "cache_read_input_tokens", 0),
+        "elapsed_sec": round(elapsed, 2),
     }
 
+async def report_cost(result: dict):
+    """POST a single worker's token cost to Paperclip."""
+    import urllib.request
+    cost_cents = int(round(
+        (result["input_tokens"] * INPUT_COST_PER_TOKEN +
+         result["output_tokens"] * OUTPUT_COST_PER_TOKEN) * 100
+    ))
+    payload = json.dumps({
+        "agentId":           PAPERCLIP_AGENT_ID,
+        "issueId":           PAPERCLIP_TASK_ID,
+        "provider":          "anthropic",
+        "biller":            "worker",
+        "billingType":       "worker_dispatch",
+        "model":             MODEL,
+        "inputTokens":       result["input_tokens"],
+        "cachedInputTokens": result["cached_input_tokens"],
+        "outputTokens":      result["output_tokens"],
+        "costCents":         max(cost_cents, 0),
+        "occurredAt":        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }).encode()
+    req = urllib.request.Request(
+        f"{PAPERCLIP_API_URL}/api/companies/{PAPERCLIP_COMPANY_ID}/cost-events",
+        data=payload,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {PAPERCLIP_API_KEY}"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as e:
+        print(f"[warn] cost report failed for {result['id']}: {e}")
+
 async def main():
-    print(f"Dispatching {len(TASKS)} workers in parallel via claude -p...")
+    print(f"Dispatching {len(TASKS)} workers in parallel...")
     results = await asyncio.gather(*[run_worker(t) for t in TASKS])
 
-    failed = [r for r in results if r["exit_code"] != 0]
+    await asyncio.gather(*[report_cost(r) for r in results], return_exceptions=True)
+
+    total_in   = sum(r["input_tokens"]  for r in results)
+    total_out  = sum(r["output_tokens"] for r in results)
+    total_cost = sum(
+        int(round((r["input_tokens"] * INPUT_COST_PER_TOKEN +
+                   r["output_tokens"] * OUTPUT_COST_PER_TOKEN) * 100))
+        for r in results
+    )
     print(f"\n=== DISPATCH SUMMARY ===")
-    print(f"Workers: {len(results)} | Failed: {len(failed)}")
+    print(f"Workers: {len(results)} | Tokens in: {total_in} | Tokens out: {total_out} | Cost: {total_cost}¢")
 
     print("\n=== WORKER OUTPUTS ===")
     for r in results:
-        status = "OK" if r["exit_code"] == 0 else "FAILED"
-        print(f"\n--- [{r['id']}] ({r['type']}, {r['elapsed_sec']}s, {status}) ---")
+        print(f"\n--- [{r['id']}] ({r['type']}, {r['elapsed_sec']}s) ---")
         print(r["output"])
         print(f"--- END [{r['id']}] ---")
 
@@ -113,8 +165,6 @@ Run with:
 ```bash
 python3 /tmp/worker_dispatch.py
 ```
-
-> **If you have an Anthropic API key:** Set `WORKER_API_KEY=sk-ant-...` as a secret on the SWE Lead agent and switch the script to use `anthropic.AsyncAnthropic(api_key=os.environ["WORKER_API_KEY"]).messages.create(...)` instead of `claude -p`. This enables Haiku (cheaper, faster) and token cost reporting to the Paperclip dashboard.
 
 ---
 
@@ -185,6 +235,8 @@ Rules:
 
 ## Cost reporting notes
 
-With subscription mode (`claude -p`), token counts are not available so cost reporting to Paperclip is skipped. The dispatch summary prints worker count and elapsed time instead.
-
-If you switch to API key mode, re-add cost reporting: POST one event per worker to `/api/companies/{companyId}/cost-events` with `biller: "worker"` and `billingType: "worker_dispatch"`. Cost reporting failures are non-fatal — log and continue.
+- `biller: "worker"` distinguishes worker costs from direct SWE Lead agent costs in the Paperclip dashboard.
+- Report one cost event per worker call (not one aggregated event) so the board sees per-task cost breakdown.
+- If `PAPERCLIP_TASK_ID` is not set, omit `issueId` from the payload.
+- Cost reporting failures are non-fatal — log the warning and continue.
+- `WORKER_API_KEY` is intentionally separate from `ANTHROPIC_API_KEY` — Claude Code ignores it so orchestrators stay on subscription auth.
