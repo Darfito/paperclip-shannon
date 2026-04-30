@@ -212,11 +212,11 @@ export function NewProjectDialog() {
     >
       <DialogContent
         showCloseButton={false}
-        className={cn("p-0 gap-0", expanded ? "sm:max-w-2xl" : "sm:max-w-lg")}
+        className={cn("p-0 gap-0 flex flex-col max-h-[90vh]", expanded ? "sm:max-w-2xl" : "sm:max-w-lg")}
         onKeyDown={handleKeyDown}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
+        <div className="flex items-center justify-between px-4 py-2.5 border-b border-border shrink-0">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             {selectedCompany && (
               <span className="bg-muted px-1.5 py-0.5 rounded text-xs font-medium">
@@ -246,8 +246,11 @@ export function NewProjectDialog() {
           </div>
         </div>
 
+        {/* Scrollable body */}
+        <div className="flex-1 overflow-y-auto min-h-0">
+
         {/* Name */}
-        <div className="px-4 pt-4 pb-2 shrink-0">
+        <div className="px-4 pt-4 pb-2">
           <input
             className="w-full text-lg font-semibold bg-transparent outline-none placeholder:text-muted-foreground/50"
             placeholder="Project name"
@@ -426,8 +429,10 @@ export function NewProjectDialog() {
           </div>
         </div>
 
+        </div>{/* end scrollable body */}
+
         {/* Footer */}
-        <div className="flex items-center justify-between px-4 py-2.5 border-t border-border">
+        <div className="flex items-center justify-between px-4 py-2.5 border-t border-border shrink-0">
           {createProject.isError ? (
             <p className="text-xs text-destructive">Failed to create project.</p>
           ) : (
