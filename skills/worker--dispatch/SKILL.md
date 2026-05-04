@@ -1,18 +1,16 @@
 ---
 name: worker--dispatch
 description: >
-  Dispatch one or more lightweight worker API calls in parallel and collect
-  their output. Use when the SWE Lead needs to fan out coding, design, or
-  testing tasks to Haiku workers. Each worker is a single
-  anthropic.messages.create() call — not a full Claude Code session. After
-  collecting output, report the aggregated token costs to Paperclip. Do NOT
-  use for tasks that require file system access, tool calls, or multi-turn
-  conversation — those belong in full agent sessions.
+  Dispatch one or more lightweight workers in parallel and collect their output.
+  Uses claude -p (subscription mode) by default — no API key required, no variable
+  billing. Set USE_API_KEY=true to fall back to WORKER_API_KEY + Anthropic SDK for
+  batches >5 workers. After collecting output, a single subscription cost event is
+  reported to Paperclip per dispatch batch.
 ---
 
 # worker--dispatch
 
-Dispatch parallel Haiku workers for coding, design, or testing tasks. Workers are single-turn `messages.create()` calls — cheap, focused, and stateless. The SWE Lead orchestrates them and reviews their output.
+Dispatch parallel workers for coding, design, or testing tasks. Workers are single-turn `claude -p` subprocess calls — cheap, focused, and stateless. The SWE Lead orchestrates them and reviews their output.
 
 ---
 
@@ -41,22 +39,25 @@ Before dispatching any workers, the SWE Lead must have:
 
 ## Dispatch script
 
-Workers call the Anthropic API directly using `WORKER_API_KEY` — a separate key from the orchestrator's `claude login` credentials so Claude Code does not pick it up as agent auth. Set `WORKER_API_KEY=sk-ant-...` as an environment variable on the SWE Lead agent in Paperclip UI → Agent → Configuration → Environment variables.
+Workers run via `claude -p` (Claude Code print mode) — no API key required, uses the subscription credentials already on the server (`claude login` as the `paperclip` user). Concurrency is capped at 5 to stay well within the safe range (empirically verified stable up to 15 on this VPS as of 2026-05-04).
 
 Write and execute the following Python script (adjust `TASKS` for your specific dispatch batch):
 
 ```python
 #!/usr/bin/env python3
-"""Worker dispatch — fan-out Sonnet workers and collect results."""
+"""Worker dispatch — fan-out claude -p workers and collect results."""
 import asyncio, os, time, json
-import anthropic
+import urllib.request
 
-PAPERCLIP_API_URL = os.environ["PAPERCLIP_API_URL"]
-PAPERCLIP_API_KEY = os.environ["PAPERCLIP_API_KEY"]
+PAPERCLIP_API_URL  = os.environ["PAPERCLIP_API_URL"]
+PAPERCLIP_API_KEY  = os.environ["PAPERCLIP_API_KEY"]
 PAPERCLIP_AGENT_ID = os.environ["PAPERCLIP_AGENT_ID"]
 PAPERCLIP_COMPANY_ID = os.environ["PAPERCLIP_COMPANY_ID"]
-PAPERCLIP_TASK_ID = os.environ.get("PAPERCLIP_TASK_ID", "")
-WORKER_API_KEY = os.environ["WORKER_API_KEY"]
+PAPERCLIP_TASK_ID  = os.environ.get("PAPERCLIP_TASK_ID", "")
+USE_API_KEY        = os.environ.get("USE_API_KEY", "").lower() == "true"
+WORKER_API_KEY     = os.environ.get("WORKER_API_KEY", "")
+
+CONCURRENCY_CAP = 5  # verified safe up to 15 on VPS; cap at 5 for production safety
 
 # ── Configure tasks ────────────────────────────────────────────────────────────
 # Each task: { "id": str, "type": "code"|"design"|"test", "prompt": str }
@@ -78,84 +79,162 @@ Rules:
     # Add more tasks here
 ]
 
-MODEL = "claude-sonnet-4-6"
-# Sonnet 4.6 pricing (per token)
-INPUT_COST_PER_TOKEN  = 3.00 / 1_000_000   # $3.00 / MTok
-OUTPUT_COST_PER_TOKEN = 15.00 / 1_000_000  # $15.00 / MTok
+# ── Rate-limit detection ───────────────────────────────────────────────────────
+RATE_LIMIT_PATTERNS = [
+    "rate limit", "rate_limit", "too many requests",
+    "overloaded", "529", "quota exceeded",
+]
 
-client = anthropic.AsyncAnthropic(api_key=WORKER_API_KEY)
+def is_rate_limited(stderr: str) -> bool:
+    s = stderr.lower()
+    return any(p in s for p in RATE_LIMIT_PATTERNS)
 
-async def run_worker(task: dict) -> dict:
-    """Call one worker and return its output + usage."""
-    start = time.time()
-    response = await client.messages.create(
-        model=MODEL,
-        max_tokens=4096,
-        messages=[{"role": "user", "content": task["prompt"]}],
-    )
-    elapsed = time.time() - start
-    usage = response.usage
-    return {
-        "id": task["id"],
-        "type": task["type"],
-        "output": response.content[0].text,
-        "input_tokens": usage.input_tokens,
-        "output_tokens": usage.output_tokens,
-        "cached_input_tokens": getattr(usage, "cache_read_input_tokens", 0),
-        "elapsed_sec": round(elapsed, 2),
-    }
+# ── Worker implementations ─────────────────────────────────────────────────────
 
-async def report_cost(result: dict):
-    """POST a single worker's token cost to Paperclip."""
-    import urllib.request
-    cost_cents = int(round(
-        (result["input_tokens"] * INPUT_COST_PER_TOKEN +
-         result["output_tokens"] * OUTPUT_COST_PER_TOKEN) * 100
-    ))
+sem = asyncio.Semaphore(CONCURRENCY_CAP)
+
+async def run_worker_subscription(task: dict) -> dict:
+    """Run one worker via claude -p (subscription mode)."""
+    async with sem:
+        start = time.time()
+        proc = await asyncio.create_subprocess_exec(
+            "claude", "-p", task["prompt"],
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return {"id": task["id"], "type": task["type"], "output": "",
+                    "exit_code": -1, "elapsed_sec": 120, "rate_limited": False,
+                    "error": "TIMEOUT after 120s"}
+        elapsed = round(time.time() - start, 2)
+        err_text = stderr.decode().strip()
+        rate_limited = is_rate_limited(err_text)
+        return {
+            "id": task["id"],
+            "type": task["type"],
+            "output": stdout.decode().strip(),
+            "exit_code": proc.returncode,
+            "elapsed_sec": elapsed,
+            "rate_limited": rate_limited,
+            "error": err_text if proc.returncode != 0 else "",
+        }
+
+async def run_worker_api(task: dict) -> dict:
+    """Run one worker via Anthropic SDK (API key fallback mode)."""
+    import anthropic
+    async with sem:
+        client = anthropic.AsyncAnthropic(api_key=WORKER_API_KEY)
+        MODEL = "claude-sonnet-4-6"
+        INPUT_COST  = 3.00 / 1_000_000
+        OUTPUT_COST = 15.00 / 1_000_000
+        start = time.time()
+        response = await client.messages.create(
+            model=MODEL,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": task["prompt"]}],
+        )
+        elapsed = round(time.time() - start, 2)
+        usage = response.usage
+        cost_cents = int(round(
+            (usage.input_tokens * INPUT_COST + usage.output_tokens * OUTPUT_COST) * 100
+        ))
+        return {
+            "id": task["id"],
+            "type": task["type"],
+            "output": response.content[0].text,
+            "exit_code": 0,
+            "elapsed_sec": elapsed,
+            "rate_limited": False,
+            "error": "",
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cost_cents": cost_cents,
+        }
+
+# ── Cost reporting ─────────────────────────────────────────────────────────────
+
+def report_batch_cost(n_workers: int, mode: str, total_cost_cents: int = 0):
+    """POST one cost event for the entire dispatch batch."""
     payload = json.dumps({
-        "agentId":           PAPERCLIP_AGENT_ID,
-        "issueId":           PAPERCLIP_TASK_ID,
-        "provider":          "anthropic",
-        "biller":            "worker",
-        "billingType":       "worker_dispatch",
-        "model":             MODEL,
-        "inputTokens":       result["input_tokens"],
-        "cachedInputTokens": result["cached_input_tokens"],
-        "outputTokens":      result["output_tokens"],
-        "costCents":         max(cost_cents, 0),
-        "occurredAt":        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "agentId":     PAPERCLIP_AGENT_ID,
+        "issueId":     PAPERCLIP_TASK_ID or None,
+        "provider":    "anthropic",
+        "biller":      "subscription" if mode == "subscription" else "worker",
+        "billingType": "subscription_dispatch" if mode == "subscription" else "metered_api",
+        "model":       "claude -p",
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "costCents":   total_cost_cents,
+        "occurredAt":  time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "metadata":    {"workers": n_workers, "mode": mode},
     }).encode()
     req = urllib.request.Request(
         f"{PAPERCLIP_API_URL}/api/companies/{PAPERCLIP_COMPANY_ID}/cost-events",
         data=payload,
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {PAPERCLIP_API_KEY}"},
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {PAPERCLIP_API_KEY}"},
         method="POST",
     )
     try:
         urllib.request.urlopen(req, timeout=10)
     except Exception as e:
-        print(f"[warn] cost report failed for {result['id']}: {e}")
+        print(f"[warn] batch cost report failed: {e}")
+
+# ── Main ───────────────────────────────────────────────────────────────────────
 
 async def main():
-    print(f"Dispatching {len(TASKS)} workers in parallel...")
-    results = await asyncio.gather(*[run_worker(t) for t in TASKS])
+    mode = "api_key" if USE_API_KEY else "subscription"
+    run_worker = run_worker_api if USE_API_KEY else run_worker_subscription
 
-    await asyncio.gather(*[report_cost(r) for r in results], return_exceptions=True)
+    if USE_API_KEY and not WORKER_API_KEY:
+        print("[error] USE_API_KEY=true but WORKER_API_KEY is not set. Aborting.")
+        return
 
-    total_in   = sum(r["input_tokens"]  for r in results)
-    total_out  = sum(r["output_tokens"] for r in results)
-    total_cost = sum(
-        int(round((r["input_tokens"] * INPUT_COST_PER_TOKEN +
-                   r["output_tokens"] * OUTPUT_COST_PER_TOKEN) * 100))
-        for r in results
-    )
+    print(f"Dispatching {len(TASKS)} workers in parallel (mode={mode}, cap={CONCURRENCY_CAP})...")
+    results = await asyncio.gather(*[run_worker(t) for t in TASKS], return_exceptions=True)
+
+    # Handle any unexpected exceptions from asyncio.gather
+    processed = []
+    for i, r in enumerate(results):
+        if isinstance(r, Exception):
+            processed.append({"id": TASKS[i]["id"], "type": TASKS[i]["type"],
+                              "output": "", "exit_code": -1, "elapsed_sec": 0,
+                              "rate_limited": False, "error": str(r)})
+        else:
+            processed.append(r)
+    results = processed
+
+    # Check for rate limit hits
+    rate_limited = [r for r in results if r.get("rate_limited")]
+    if rate_limited:
+        print(f"\n[RATE LIMIT HIT] {len(rate_limited)} workers were rate-limited.")
+        print("Post a comment on this ticket: 'WORKERS RATE LIMITED — subscription window exhausted.")
+        print("Retry after ~60 minutes (Max plan rolling window). Set USE_API_KEY=true to bypass with WORKER_API_KEY.'")
+
+    # Report batch cost
+    if USE_API_KEY:
+        total_cost = sum(r.get("cost_cents", 0) for r in results)
+        report_batch_cost(len(TASKS), "api_key", total_cost)
+    else:
+        report_batch_cost(len(TASKS), "subscription", 0)
+
+    # Summary
+    failed = [r for r in results if r["exit_code"] != 0]
     print(f"\n=== DISPATCH SUMMARY ===")
-    print(f"Workers: {len(results)} | Tokens in: {total_in} | Tokens out: {total_out} | Cost: {total_cost}¢")
+    print(f"Mode: {mode} | Workers: {len(results)} | Failed: {len(failed)}/{len(results)}")
 
     print("\n=== WORKER OUTPUTS ===")
     for r in results:
-        print(f"\n--- [{r['id']}] ({r['type']}, {r['elapsed_sec']}s) ---")
-        print(r["output"])
+        status = "OK" if r["exit_code"] == 0 else ("RATE_LIMITED" if r.get("rate_limited") else "FAILED")
+        print(f"\n--- [{r['id']}] ({r['type']}, {r['elapsed_sec']}s, {status}) ---")
+        if r["output"]:
+            print(r["output"])
+        if r["error"]:
+            print(f"[error] {r['error']}")
         print(f"--- END [{r['id']}] ---")
 
 asyncio.run(main())
@@ -165,6 +244,18 @@ Run with:
 ```bash
 python3 /tmp/worker_dispatch.py
 ```
+
+---
+
+## Fallback: API key mode
+
+If you hit the subscription rate limit mid-pipeline, or need >5 truly parallel workers (raise the cap carefully), switch to API key mode:
+
+1. Set `USE_API_KEY=true` on the SWE Lead agent (Paperclip UI → Agent → Configuration → Environment variables)
+2. Set `WORKER_API_KEY=sk-ant-...` — **must be different from `ANTHROPIC_API_KEY`** so Claude Code doesn't pick it up as orchestrator auth
+3. The dispatch script picks the API path automatically
+
+API key mode uses `claude-sonnet-4-6` and reports per-batch token costs to the Paperclip dashboard.
 
 ---
 
@@ -235,8 +326,18 @@ Rules:
 
 ## Cost reporting notes
 
-- `biller: "worker"` distinguishes worker costs from direct SWE Lead agent costs in the Paperclip dashboard.
-- Report one cost event per worker call (not one aggregated event) so the board sees per-task cost breakdown.
-- If `PAPERCLIP_TASK_ID` is not set, omit `issueId` from the payload.
-- Cost reporting failures are non-fatal — log the warning and continue.
-- `WORKER_API_KEY` is intentionally separate from `ANTHROPIC_API_KEY` — Claude Code ignores it so orchestrators stay on subscription auth.
+**Subscription mode (default):** Token counts are not available from `claude -p`, so one batch event with `biller: "subscription"` and `costCents: 0` is posted per dispatch. This records that a dispatch happened without a false per-token cost estimate.
+
+**API key mode:** One event per batch with `biller: "worker"`, `billingType: "metered_api"`, and actual cost in cents. Failures are non-fatal — log and continue.
+
+---
+
+## Rate limit behaviour
+
+If the subscription window is exhausted mid-pipeline:
+- Affected workers exit with non-zero code and `rate_limited: true`
+- The dispatch script prints a clear message with retry guidance
+- Post a comment on the Paperclip ticket: `WORKERS RATE LIMITED — retry after ~60 minutes or set USE_API_KEY=true`
+- Do not silently fail — operator must see the block
+
+Max plan rolling window: ~60 minutes (verify current Anthropic policy on rate limit reset).
