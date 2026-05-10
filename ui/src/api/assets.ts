@@ -26,4 +26,12 @@ export const assetsApi = {
     form.append("file", safeFile);
     return api.postForm<AssetImage>(`/companies/${companyId}/logo`, form);
   },
+
+  parseDocument: async (file: File): Promise<{ text: string; filename: string }> => {
+    const buffer = await file.arrayBuffer();
+    const safeFile = new File([buffer], file.name, { type: file.type });
+    const form = new FormData();
+    form.append("file", safeFile);
+    return api.postForm<{ text: string; filename: string }>("/documents/parse", form);
+  },
 };

@@ -2,12 +2,15 @@ import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import createDOMPurify from "dompurify";
 import { JSDOM } from "jsdom";
+import { PDFParse } from "pdf-parse";
 import type { Db } from "@paperclipai/db";
 import { createAssetImageMetadataSchema } from "@paperclipai/shared";
 import type { StorageService } from "../storage/types.js";
 import { assetService, logActivity } from "../services/index.js";
 import { isAllowedContentType, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
+
+const DOCUMENT_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
 const SVG_CONTENT_TYPE = "image/svg+xml";
 const ALLOWED_COMPANY_LOGO_CONTENT_TYPES = new Set([
   "image/png",
@@ -334,6 +337,53 @@ export function assetRoutes(db: Db, storage: StorageService) {
       next(err);
     });
     object.stream.pipe(res);
+  });
+
+  // Document parse — extracts plain text from a .md or .pdf upload.
+  // Used by the New Project dialog URS import feature.
+  const documentUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: DOCUMENT_MAX_BYTES, files: 1 },
+  });
+
+  router.post("/documents/parse", async (req, res) => {
+    try {
+      await runSingleFileUpload(documentUpload, req, res);
+    } catch (err) {
+      if (err instanceof multer.MulterError) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          res.status(422).json({ error: "File exceeds 5 MB limit" });
+          return;
+        }
+        res.status(400).json({ error: (err as multer.MulterError).message });
+        return;
+      }
+      throw err;
+    }
+
+    const file = (req as Request & { file?: { mimetype: string; buffer: Buffer; originalname: string } }).file;
+    if (!file) {
+      res.status(400).json({ error: "Missing file field 'file'" });
+      return;
+    }
+
+    const { originalname, buffer } = file;
+    const lower = originalname.toLowerCase();
+
+    if (lower.endsWith(".md") || lower.endsWith(".txt")) {
+      res.json({ text: buffer.toString("utf8"), filename: originalname });
+      return;
+    }
+
+    if (lower.endsWith(".pdf")) {
+      const parser = new PDFParse({ data: buffer });
+      const result = await parser.getText();
+      await parser.destroy();
+      res.json({ text: result.text.trim(), filename: originalname });
+      return;
+    }
+
+    res.status(415).json({ error: "Unsupported file type. Upload a .md or .pdf file." });
   });
 
   return router;

@@ -7,6 +7,7 @@ import { projectsApi } from "../api/projects";
 import { agentsApi } from "../api/agents";
 import { goalsApi } from "../api/goals";
 import { assetsApi } from "../api/assets";
+import { FileText } from "lucide-react";
 import { buildMarkdownMentionOptions } from "../lib/company-members";
 import { queryKeys } from "../lib/queryKeys";
 import {
@@ -60,10 +61,14 @@ export function NewProjectDialog() {
   const [workspaceLocalPath, setWorkspaceLocalPath] = useState("");
   const [workspaceRepoUrl, setWorkspaceRepoUrl] = useState("");
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [ursFileName, setUrsFileName] = useState<string | null>(null);
+  const [ursParseError, setUrsParseError] = useState<string | null>(null);
+  const [ursLoading, setUrsLoading] = useState(false);
 
   const [statusOpen, setStatusOpen] = useState(false);
   const [goalOpen, setGoalOpen] = useState(false);
   const descriptionEditorRef = useRef<MarkdownEditorRef>(null);
+  const ursFileInputRef = useRef<HTMLInputElement>(null);
 
   const { data: goals } = useQuery({
     queryKey: queryKeys.goals.list(selectedCompanyId!),
@@ -112,6 +117,25 @@ export function NewProjectDialog() {
     setWorkspaceLocalPath("");
     setWorkspaceRepoUrl("");
     setWorkspaceError(null);
+    setUrsFileName(null);
+    setUrsParseError(null);
+    setUrsLoading(false);
+    if (ursFileInputRef.current) ursFileInputRef.current.value = "";
+  }
+
+  async function handleUrsFile(file: File) {
+    setUrsParseError(null);
+    setUrsLoading(true);
+    try {
+      const result = await assetsApi.parseDocument(file);
+      const header = `<!-- URS: ${result.filename} -->\n\n`;
+      setDescription((prev) => (prev ? `${header}${result.text}\n\n---\n\n${prev}` : `${header}${result.text}`));
+      setUrsFileName(result.filename);
+    } catch {
+      setUrsParseError("Failed to parse file. Make sure it is a valid .md or .pdf under 5 MB.");
+    } finally {
+      setUrsLoading(false);
+    }
   }
 
   const isAbsolutePath = (value: string) => value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value);
@@ -264,6 +288,49 @@ export function NewProjectDialog() {
             }}
             autoFocus
           />
+        </div>
+
+        {/* URS import */}
+        <div className="px-4 pb-1 flex items-center gap-2">
+          <input
+            ref={ursFileInputRef}
+            type="file"
+            accept=".md,.pdf"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) handleUrsFile(file);
+            }}
+          />
+          {ursFileName ? (
+            <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+              <FileText className="h-3 w-3 shrink-0" />
+              <span className="max-w-[200px] truncate">{ursFileName}</span>
+              <button
+                type="button"
+                className="text-muted-foreground hover:text-foreground ml-0.5"
+                onClick={() => {
+                  setUrsFileName(null);
+                  if (ursFileInputRef.current) ursFileInputRef.current.value = "";
+                }}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+          ) : (
+            <button
+              type="button"
+              className="inline-flex items-center gap-1.5 rounded-md border border-dashed border-border px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent/50 transition-colors disabled:opacity-60"
+              disabled={ursLoading}
+              onClick={() => ursFileInputRef.current?.click()}
+            >
+              <FileText className="h-3 w-3" />
+              {ursLoading ? "Parsing…" : "Import URS (.md / .pdf)"}
+            </button>
+          )}
+          {ursParseError && (
+            <span className="text-xs text-destructive">{ursParseError}</span>
+          )}
         </div>
 
         {/* Description */}
