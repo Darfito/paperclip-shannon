@@ -7,6 +7,8 @@ description: >
   Reads project-config.json, product-mission.md, and any existing screen
   spec, then writes the spec to .claude/docs/specs/{feature-name}.md and
   updates project-state.md. Derives the feature name from the current issue.
+  Supports --from-urs FR-XX mode: reads spec data directly from urs/index.json
+  instead of open-ended analysis. Use --from-urs on URS-first FR issues.
 ---
 
 # foundation--shape-spec
@@ -17,6 +19,106 @@ Create a feature spec. The spec is the contract between planning and building �
 - `.claude/project-config.json` must exist
 - `.claude/docs/project-state.md` should exist
 - `.claude/docs/specs/_template.md` must exist
+
+---
+
+## --from-urs mode (URS-first FR issues)
+
+**Detect:** If the issue description contains `--from-urs FR-XX` (where XX is a two-digit number), activate `--from-urs` mode. All steps below are replaced by the URS-first workflow. Do NOT run the standard Steps 1–6 in this case.
+
+### --from-urs Step 1 — Extract FR ID
+
+Parse the FR ID from the issue description: look for the pattern `--from-urs (FR-\d+)`.
+
+### --from-urs Step 2 — Read URS artifacts
+
+Read:
+- `urs/index.json` — find the entry where `id == "{FR_ID}"`
+- `urs/applies-to.json` — find all entries that include `{FR_ID}` in their `applies_to` list
+
+Extract from the FR entry: `id`, `title`, `text`, `rank`, `risk_zone`.
+Extract from `applies-to.json`: NFR/UR/VR constraints that apply to this FR.
+
+### --from-urs Step 3 — Write spec from URS data
+
+Determine feature slug: lowercase the title, replace spaces with hyphens, strip special chars.
+
+Write `specs/{feature-slug}.md` using the standard spec template structure, populated entirely from URS data — no LLM invention of requirements:
+
+```markdown
+# Spec: {FR_ID} — {title}
+
+**Source:** urs/index.json → {FR_ID}
+**Risk Zone:** Z{risk_zone} (Rank {rank})
+**Generated:** {today's date}
+
+## Requirement
+
+{text from urs/index.json — verbatim}
+
+## Constraints (from applies-to.json)
+
+{For each NFR/UR/VR that applies to this FR:}
+- **{id} ({type}):** {title}
+
+## Acceptance Criteria
+
+Derive 2–4 testable, verb-first criteria directly from the requirement text. Example:
+- "Users can {action implied by FR text}"
+- "{System} rejects {negative case from FR text}"
+
+Do NOT invent criteria beyond what the requirement text implies.
+
+## Data Shape
+
+Based on the requirement text, identify:
+- Tables likely touched (nouns in the requirement)
+- New columns or tables needed
+- Any RPC-level logic (complex business rules)
+
+## Implementation Notes
+
+Edge cases and constraints implied by the requirement text and its NFR/UR/VR constraints.
+```
+
+### --from-urs Step 4 — Write task expansion record
+
+Write `urs/tasks/{FR_ID}.json`:
+
+```json
+{
+  "fr_id": "{FR_ID}",
+  "tasks": ["spec", "migration", "rpc", "action", "component", "tests"],
+  "completed": ["spec"],
+  "spec_path": "specs/{feature-slug}.md",
+  "generated_at": "{ISO timestamp}"
+}
+```
+
+### --from-urs Step 5 — Update project-state.md
+
+Read `.claude/docs/project-state.md`. In the `## URS Backlog` section, update the row for this FR: set Maturity to `spec`, update Last Updated.
+
+### --from-urs Step 6 — Post completion comment
+
+Post on the issue:
+
+```
+Spec written from URS data.
+
+- Source: urs/index.json → {FR_ID}
+- Spec: specs/{feature-slug}.md
+- Task expansion: urs/tasks/{FR_ID}.json
+- Constraints applied: {list of NFR/UR/VR IDs that apply to this FR}
+
+Next: run architecture--new-feature (if schema changes needed) or implementation--new-feature.
+```
+
+---
+
+## Standard mode (non-URS issues)
+
+If the issue description does NOT contain `--from-urs`, use the standard workflow below.
 
 ---
 

@@ -23,15 +23,17 @@ Spec references:
 - Quick reference: [references/companies-spec.md](references/companies-spec.md)
 - Shannon v2 template (sequential): [references/shannon-company.md](references/shannon-company.md)
 - Shannon v3 template (roundtable / debate): [references/shannon-v3-company.md](references/shannon-v3-company.md)
+- Shannon v4 template (URS-first + roundtable): [references/shannon-v4-company.md](references/shannon-v4-company.md)
 
 ### Template variants
 
-| Variant | Spec stage flow | When to use |
-|---|---|---|
-| **v2** (default) | Linear `CEO → PM → UI/UX → SWE` via `NEXT_COMMAND:` | Stable, well-tested. Use when the PM brief is unlikely to need technical pushback. |
-| **v3** (roundtable) | Tagged-signal debate: `CEO → PM ↔ SWE Lead`, optional UI/UX, server-side validation gate | Use when SWE Lead should validate PM briefs before execution. Requires the `debate-router` server code (Step 12). |
+| Variant | Spec stage flow | URS-first lane | When to use |
+|---|---|---|---|
+| **v2** (default) | Linear `CEO → PM → UI/UX → SWE` via `NEXT_COMMAND:` | No | Stable, well-tested. Use when the PM brief is unlikely to need technical pushback. |
+| **v3** (roundtable) | Tagged-signal debate: `CEO → PM ↔ SWE Lead`, optional UI/UX | No | Use when SWE Lead should validate PM briefs before execution. Requires debate-router server code (Steps 12+13). |
+| **v4** (URS-first) | Same as v3 debate + auto-wakeup | Yes — CEO ingests URS, PM auto-creates Sprint 0 FR tickets | Use when starting from a written URS or product brief that should auto-generate FR issues. Requires Steps 12+13 + 5 URS skills. |
 
-Both variants are interchangeable at the company level — swap by re-importing with the other template.
+All variants are interchangeable at the company level — swap by re-importing with a different template.
 
 ---
 
@@ -41,10 +43,10 @@ Both variants are interchangeable at the company level — swap by re-importing 
 
 Ask the user **four** things in one round:
 
-1. **Template variant** — `v2` (sequential, default) or `v3` (roundtable / debate). Explain the trade-off only if the user asks.
+1. **Template variant** — `v2` (sequential, default), `v3` (roundtable / debate), or `v4` (URS-first + roundtable). Explain the trade-off only if the user asks.
 2. **Project name** — what is this factory company building? (e.g. "XLSMART Package Advisor", "Santoso Protocol")
 3. **Project path** — absolute path to the project directory on the server (will be set as `cwd` for each agent, e.g. `/home/santoso/gunawan-agents/my-project`)
-4. **Output directory** — where to write the company package (default: `companies/<project-slug>/` or `companies/<project-slug>-v3/` for the v3 variant)
+4. **Output directory** — where to write the company package (default: `companies/<project-slug>/`, `companies/<project-slug>-v3/` for v3, `companies/<project-slug>-v4/` for v4)
 
 Do not ask about agents, skills, workflow, or company structure — those are pre-defined per variant.
 
@@ -54,6 +56,7 @@ Read the template file matching the chosen variant:
 
 - v2 → [references/shannon-company.md](references/shannon-company.md)
 - v3 → [references/shannon-v3-company.md](references/shannon-v3-company.md)
+- v4 → [references/shannon-v4-company.md](references/shannon-v4-company.md)
 
 This is the canonical package template. Generate all files from it, substituting:
 
