@@ -30,6 +30,7 @@ import {
   getClosedIsolatedExecutionWorkspaceMessage,
   isClosedIsolatedExecutionWorkspace,
   PIPELINE_STAGES,
+  type CreateIssueThreadInteraction,
   type PipelineStage,
   type ExecutionWorkspace,
 } from "@paperclipai/shared";
@@ -57,6 +58,17 @@ import {
   routineService,
   workProductService,
 } from "../services/index.js";
+// Pure helpers: import directly so route tests that mock "../services/index.js"
+// don't need to declare these exports in their mock.
+import {
+  buildAgentRoleMap,
+  classifyDebateAgent,
+  decideDebateAction,
+  deriveDebateState,
+  parseDebateSignals,
+  validateSweConcerns,
+  type DebateRouterDecision,
+} from "../services/debate-router.js";
 import { logger } from "../middleware/logger.js";
 import { conflict, forbidden, HttpError, notFound, unauthorized } from "../errors.js";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
@@ -3422,6 +3434,26 @@ export function issueRoutes(
       }
     }
 
+    // Shannon Step 12 — Roundtable debate: enforce ≥2-concerns rule on SWE Lead
+    // [CONFIRMED]/[CONCERNS] before the comment is persisted. Sycophancy guard.
+    let debateSignalsForBody: ReturnType<typeof parseDebateSignals> = [];
+    if (actor.actorType === "agent" && actor.agentId) {
+      debateSignalsForBody = parseDebateSignals(req.body.body);
+      const hasSweSignal = debateSignalsForBody.some(
+        (s) => s.tag === "CONFIRMED" || s.tag === "CONCERNS",
+      );
+      if (hasSweSignal) {
+        const author = await agentsSvc.getById(actor.agentId);
+        if (author && classifyDebateAgent(author) === "swe_lead") {
+          const validationError = validateSweConcerns(debateSignalsForBody);
+          if (validationError) {
+            res.status(400).json({ error: validationError });
+            return;
+          }
+        }
+      }
+    }
+
     const comment = await svc.addComment(id, req.body.body, {
       agentId: actor.agentId ?? undefined,
       userId: actor.actorType === "user" ? actor.actorId : undefined,
@@ -3466,6 +3498,127 @@ export function issueRoutes(
             },
           });
           currentIssue = advanced;
+        }
+      }
+    }
+
+    // Shannon Step 12 — Roundtable debate routing.
+    // Runs only during the `spec` pipeline stage and only when the agent did not
+    // post an explicit NEXT_COMMAND: marker (which is treated as override).
+    let debateDecision: DebateRouterDecision | null = null;
+    if (
+      actor.actorType === "agent" &&
+      (currentIssue.pipelineStage === "spec" || currentIssue.pipelineStage === null) &&
+      debateSignalsForBody.length > 0 &&
+      !parseNextCommand(req.body.body)
+    ) {
+      try {
+        const [allComments, agentRoster] = await Promise.all([
+          svc.listComments(currentIssue.id, { order: "asc", limit: null }),
+          agentsSvc.list(currentIssue.companyId),
+        ]);
+        const state = deriveDebateState(allComments);
+        const roleMap = buildAgentRoleMap(agentRoster);
+        debateDecision = decideDebateAction(state, roleMap);
+      } catch (err) {
+        logger.warn({ err, issueId: currentIssue.id }, "debate router failed to compute decision");
+      }
+    }
+
+    if (debateDecision) {
+      if (debateDecision.triggerHumanCheckpoint) {
+        try {
+          const checkpointInput: CreateIssueThreadInteraction = {
+            kind: "request_confirmation",
+            continuationPolicy: "wake_assignee",
+            idempotencyKey: `debate_round_trip_cap:${currentIssue.id}`,
+            sourceCommentId: comment.id,
+            title: "Debate round-trip cap reached",
+            summary: `Roundtable hit hard cap (${debateDecision.triggerHumanCheckpoint.reason}). Human input required to unblock.`,
+            payload: {
+              version: 1,
+              prompt:
+                "Roundtable debate has reached the maximum round-trip cap. Please review the discussion and decide how to proceed.",
+              allowDeclineReason: true,
+            },
+          };
+          await issueThreadInteractionService(db).create(
+            { id: currentIssue.id, companyId: currentIssue.companyId },
+            checkpointInput,
+            { agentId: actor.agentId ?? null, userId: null },
+          );
+          await logActivity(db, {
+            companyId: currentIssue.companyId,
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            agentId: actor.agentId,
+            runId: actor.runId,
+            action: "issue.debate_escalated_to_human",
+            entityType: "issue",
+            entityId: currentIssue.id,
+            details: {
+              identifier: currentIssue.identifier,
+              reason: debateDecision.reason,
+              latestTag: debateDecision.latestTag ?? null,
+              source: "debate_router",
+            },
+          });
+        } catch (err) {
+          logger.warn(
+            { err, issueId: currentIssue.id },
+            "failed to create debate round-trip cap human checkpoint",
+          );
+        }
+      } else if (debateDecision.reassignAgentId || debateDecision.advanceToStage) {
+        const debatePatch: Record<string, unknown> = {};
+        if (debateDecision.advanceToStage) debatePatch.pipelineStage = debateDecision.advanceToStage;
+        if (debateDecision.reassignAgentId) {
+          debatePatch.assigneeAgentId = debateDecision.reassignAgentId;
+          debatePatch.status = "todo";
+        }
+        const advanced = await svc.update(id, debatePatch);
+        if (advanced) {
+          if (debateDecision.reassignAgentId) {
+            void queueIssueAssignmentWakeup({
+              heartbeat,
+              issue: { id: advanced.id, assigneeAgentId: advanced.assigneeAgentId, status: advanced.status },
+              reason: "debate_router",
+              mutation: "debate_router",
+              contextSource: "issue_comment_debate_router",
+              requestedByActorType: "agent",
+              requestedByActorId: actor.actorId,
+            });
+          }
+          await logActivity(db, {
+            companyId: currentIssue.companyId,
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            agentId: actor.agentId,
+            runId: actor.runId,
+            action: "issue.debate_routed",
+            entityType: "issue",
+            entityId: id,
+            details: {
+              identifier: currentIssue.identifier,
+              reason: debateDecision.reason,
+              latestTag: debateDecision.latestTag ?? null,
+              assigneeAgentId: debateDecision.reassignAgentId ?? null,
+              pipelineStage: debateDecision.advanceToStage ?? advanced.pipelineStage ?? null,
+              source: "debate_router",
+            },
+          });
+          currentIssue = advanced;
+
+          // Shannon Step 13 — post system comment as wakeup trigger for the newly assigned agent.
+          // The comment becomes the most recent item in the thread, so when the agent wakes it
+          // immediately sees its instructions without needing a manual human comment.
+          if (debateDecision.systemComment) {
+            try {
+              await svc.addComment(currentIssue.id, debateDecision.systemComment, {});
+            } catch (err) {
+              logger.warn({ err, issueId: currentIssue.id }, "failed to insert debate system comment");
+            }
+          }
         }
       }
     }

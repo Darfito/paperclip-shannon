@@ -21,7 +21,17 @@ Spec references:
 
 - Normative spec: `docs/companies/companies-spec.md`
 - Quick reference: [references/companies-spec.md](references/companies-spec.md)
-- Shannon template: [references/shannon-company.md](references/shannon-company.md)
+- Shannon v2 template (sequential): [references/shannon-company.md](references/shannon-company.md)
+- Shannon v3 template (roundtable / debate): [references/shannon-v3-company.md](references/shannon-v3-company.md)
+
+### Template variants
+
+| Variant | Spec stage flow | When to use |
+|---|---|---|
+| **v2** (default) | Linear `CEO → PM → UI/UX → SWE` via `NEXT_COMMAND:` | Stable, well-tested. Use when the PM brief is unlikely to need technical pushback. |
+| **v3** (roundtable) | Tagged-signal debate: `CEO → PM ↔ SWE Lead`, optional UI/UX, server-side validation gate | Use when SWE Lead should validate PM briefs before execution. Requires the `debate-router` server code (Step 12). |
+
+Both variants are interchangeable at the company level — swap by re-importing with the other template.
 
 ---
 
@@ -29,17 +39,23 @@ Spec references:
 
 ### Step 1: Gather context (use AskUserQuestion)
 
-Ask the user three things in one round:
+Ask the user **four** things in one round:
 
-1. **Project name** — what is this factory company building? (e.g. "XLSMART Package Advisor", "Santoso Protocol")
-2. **Project path** — absolute path to the project directory on the server (will be set as `cwd` for each agent, e.g. `/home/santoso/gunawan-agents/my-project`)
-3. **Output directory** — where to write the company package (default: `companies/<project-slug>/`)
+1. **Template variant** — `v2` (sequential, default) or `v3` (roundtable / debate). Explain the trade-off only if the user asks.
+2. **Project name** — what is this factory company building? (e.g. "XLSMART Package Advisor", "Santoso Protocol")
+3. **Project path** — absolute path to the project directory on the server (will be set as `cwd` for each agent, e.g. `/home/santoso/gunawan-agents/my-project`)
+4. **Output directory** — where to write the company package (default: `companies/<project-slug>/` or `companies/<project-slug>-v3/` for the v3 variant)
 
-Do not ask about agents, skills, workflow, or company structure — those are pre-defined.
+Do not ask about agents, skills, workflow, or company structure — those are pre-defined per variant.
 
 ### Step 2: Read the template
 
-Read [references/shannon-company.md](references/shannon-company.md). This is the canonical package template. Generate all files from it, substituting:
+Read the template file matching the chosen variant:
+
+- v2 → [references/shannon-company.md](references/shannon-company.md)
+- v3 → [references/shannon-v3-company.md](references/shannon-v3-company.md)
+
+This is the canonical package template. Generate all files from it, substituting:
 
 - Company `name` and `slug` with the project name
 - `cwd` in `.paperclip.yaml` with the project path from Step 1

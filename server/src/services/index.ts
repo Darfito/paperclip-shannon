@@ -44,6 +44,22 @@ export { companyPortabilityService } from "./company-portability.js";
 export { environmentService } from "./environments.js";
 export { executionWorkspaceService } from "./execution-workspaces.js";
 export { workspaceOperationService } from "./workspace-operations.js";
+export {
+  buildAgentRoleMap,
+  classifyDebateAgent,
+  decideDebateAction,
+  deriveDebateState,
+  MAX_DEBATE_ROUND_TRIPS,
+  MAX_PM_REVISIONS_BEFORE_CEO,
+  parseDebateSignals,
+  validateSweConcerns,
+  type DebateAgentRef,
+  type DebateAgentRole,
+  type DebateRouterDecision,
+  type DebateSignal,
+  type DebateSignalTag,
+  type DebateState,
+} from "./debate-router.js";
 export { workProductService } from "./work-products.js";
 export { logActivity, type LogActivityInput } from "./activity-log.js";
 export { notifyHireApproved, type NotifyHireApprovedInput } from "./hire-hook.js";

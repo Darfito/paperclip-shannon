@@ -164,7 +164,7 @@ def report_batch_cost(n_workers: int, mode: str, total_cost_cents: int = 0):
         "issueId":     PAPERCLIP_TASK_ID or None,
         "provider":    "anthropic",
         "biller":      "subscription" if mode == "subscription" else "worker",
-        "billingType": "subscription_dispatch" if mode == "subscription" else "metered_api",
+        "billingType": "subscription_included" if mode == "subscription" else "metered_api",
         "model":       "claude -p",
         "inputTokens": 0,
         "outputTokens": 0,
