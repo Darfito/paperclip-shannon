@@ -23,6 +23,7 @@ import { IssuesList } from "../components/IssuesList";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PageTabBar } from "../components/PageTabBar";
 import { ProjectWorkspacesContent } from "../components/ProjectWorkspacesContent";
+import { ArtifactsTab } from "../components/ArtifactsTab";
 import { buildProjectWorkspaceSummaries } from "../lib/project-workspaces-tab";
 import { collectLiveIssueIds } from "../lib/liveIssueIds";
 import { projectRouteRef } from "../lib/utils";
@@ -33,7 +34,7 @@ import { PluginSlotMount, PluginSlotOutlet, usePluginSlots } from "@/plugins/slo
 
 /* ── Top-level tab types ── */
 
-type ProjectBaseTab = "overview" | "list" | "workspaces" | "configuration" | "budget";
+type ProjectBaseTab = "overview" | "list" | "workspaces" | "configuration" | "budget" | "artifacts";
 type ProjectPluginTab = `plugin:${string}`;
 type ProjectTab = ProjectBaseTab | ProjectPluginTab;
 
@@ -51,6 +52,7 @@ function resolveProjectTab(pathname: string, projectId: string): ProjectTab | nu
   if (tab === "budget") return "budget";
   if (tab === "issues") return "list";
   if (tab === "workspaces") return "workspaces";
+  if (tab === "artifacts") return "artifacts";
   return null;
 }
 
@@ -394,6 +396,10 @@ export function ProjectDetail() {
       navigate(`/projects/${canonicalProjectRef}/workspaces`, { replace: true });
       return;
     }
+    if (activeTab === "artifacts") {
+      navigate(`/projects/${canonicalProjectRef}/artifacts`, { replace: true });
+      return;
+    }
     if (activeTab === "list") {
       if (filter) {
         navigate(`/projects/${canonicalProjectRef}/issues/${filter}`, { replace: true });
@@ -523,6 +529,9 @@ export function ProjectDetail() {
     if (cachedTab === "budget") {
       return <Navigate to={`/projects/${canonicalProjectRef}/budget`} replace />;
     }
+    if (cachedTab === "artifacts") {
+      return <Navigate to={`/projects/${canonicalProjectRef}/artifacts`} replace />;
+    }
     if (cachedTab === "workspaces" && workspaceTabDecisionLoaded && showWorkspacesTab) {
       return <Navigate to={`/projects/${canonicalProjectRef}/workspaces`} replace />;
     }
@@ -552,6 +561,8 @@ export function ProjectDetail() {
       navigate(`/projects/${canonicalProjectRef}/overview`);
     } else if (tab === "workspaces") {
       navigate(`/projects/${canonicalProjectRef}/workspaces`);
+    } else if (tab === "artifacts") {
+      navigate(`/projects/${canonicalProjectRef}/artifacts`);
     } else if (tab === "budget") {
       navigate(`/projects/${canonicalProjectRef}/budget`);
     } else if (tab === "configuration") {
@@ -625,6 +636,7 @@ export function ProjectDetail() {
             ...(showWorkspacesTab ? [{ value: "workspaces", label: "Workspaces" }] : []),
             { value: "configuration", label: "Configuration" },
             { value: "budget", label: "Budget" },
+            { value: "artifacts", label: "Artifacts" },
             ...pluginTabItems.map((item) => ({
               value: item.value,
               label: item.label,
@@ -679,6 +691,10 @@ export function ProjectDetail() {
             archivePending={archiveProject.isPending}
           />
         </div>
+      )}
+
+      {activeTab === "artifacts" && project?.id && (
+        <ArtifactsTab projectId={project.id} />
       )}
 
       {activeTab === "budget" && resolvedCompanyId ? (

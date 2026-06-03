@@ -2,11 +2,15 @@ import { useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useDialog } from "../context/DialogContext";
 import { useCompany } from "../context/CompanyContext";
+import { useToastActions } from "../context/ToastContext";
 import { accessApi } from "../api/access";
 import { projectsApi } from "../api/projects";
 import { agentsApi } from "../api/agents";
 import { goalsApi } from "../api/goals";
 import { assetsApi } from "../api/assets";
+import { issuesApi } from "../api/issues";
+import { artifactsApi } from "../api/artifacts";
+import { ApiError } from "../api/client";
 import { FileText } from "lucide-react";
 import { buildMarkdownMentionOptions } from "../lib/company-members";
 import { queryKeys } from "../lib/queryKeys";
@@ -51,6 +55,7 @@ const projectStatuses = [
 export function NewProjectDialog() {
   const { newProjectOpen, closeNewProject } = useDialog();
   const { selectedCompanyId, selectedCompany } = useCompany();
+  const { pushToast, dismissToast } = useToastActions();
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -61,9 +66,9 @@ export function NewProjectDialog() {
   const [workspaceLocalPath, setWorkspaceLocalPath] = useState("");
   const [workspaceRepoUrl, setWorkspaceRepoUrl] = useState("");
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [ursFile, setUrsFile] = useState<File | null>(null);
   const [ursFileName, setUrsFileName] = useState<string | null>(null);
-  const [ursParseError, setUrsParseError] = useState<string | null>(null);
-  const [ursLoading, setUrsLoading] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const [statusOpen, setStatusOpen] = useState(false);
   const [goalOpen, setGoalOpen] = useState(false);
@@ -117,25 +122,15 @@ export function NewProjectDialog() {
     setWorkspaceLocalPath("");
     setWorkspaceRepoUrl("");
     setWorkspaceError(null);
+    setUrsFile(null);
     setUrsFileName(null);
-    setUrsParseError(null);
-    setUrsLoading(false);
+    setIsSubmitting(false);
     if (ursFileInputRef.current) ursFileInputRef.current.value = "";
   }
 
-  async function handleUrsFile(file: File) {
-    setUrsParseError(null);
-    setUrsLoading(true);
-    try {
-      const result = await assetsApi.parseDocument(file);
-      const header = `<!-- URS: ${result.filename} -->\n\n`;
-      setDescription((prev) => (prev ? `${header}${result.text}\n\n---\n\n${prev}` : `${header}${result.text}`));
-      setUrsFileName(result.filename);
-    } catch {
-      setUrsParseError("Failed to parse file. Make sure it is a valid .md or .pdf under 5 MB.");
-    } finally {
-      setUrsLoading(false);
-    }
+  function handleUrsFile(file: File) {
+    setUrsFile(file);
+    setUrsFileName(file.name);
   }
 
   const isAbsolutePath = (value: string) => value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value);
@@ -183,6 +178,7 @@ export function NewProjectDialog() {
     }
 
     setWorkspaceError(null);
+    setIsSubmitting(true);
 
     try {
       const created = await createProject.mutateAsync({
@@ -207,9 +203,82 @@ export function NewProjectDialog() {
 
       queryClient.invalidateQueries({ queryKey: queryKeys.projects.list(selectedCompanyId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.projects.detail(created.id) });
+
+      // Capture before reset() clears state.
+      const capturedFile = ursFile;
+      const capturedName = ursFileName ?? ursFile?.name ?? null;
+      const capturedProjectId = created.id;
+      const capturedCompanyId = selectedCompanyId;
+      const capturedPrefix = (selectedCompany?.issuePrefix ?? "").trim();
+      // The server now auto-creates a kickoff issue assigned to the CEO inside
+      // POST /companies/:id/projects. We just consume the IDs here to attach the
+      // URS file (if any) and toast the result.
+      const kickoffIssueId = (created as { kickoffIssueId?: string | null }).kickoffIssueId ?? null;
+      const kickoffIssueIdentifier = (created as { kickoffIssueIdentifier?: string | null }).kickoffIssueIdentifier ?? null;
+      const assignee = agents?.find((a) => /\bceo\b|chief executive/i.test(a.name ?? ""))
+        ?? agents?.find((a) => /\bpm\b|product manager/i.test(a.name ?? ""))
+        ?? agents?.find((a) => a.status !== "terminated");
+
       reset();
       closeNewProject();
+
+      // Toast the auto-created kickoff so the user can jump straight to it.
+      if (kickoffIssueId) {
+        const issueRef = kickoffIssueIdentifier ?? kickoffIssueId;
+        pushToast({
+          title: "Project kickoff created",
+          body: assignee ? `Assigned to ${assignee.name}` : "Ready to be picked up",
+          tone: "success",
+          action: capturedPrefix
+            ? { label: `Open kickoff`, href: `/${capturedPrefix}/issues/${issueRef}` }
+            : undefined,
+        });
+      }
+
+      // If a URS file was uploaded, attach it to the auto-created kickoff issue
+      // and write urs/main.md so the Artifacts tab shows it immediately.
+      if (capturedFile && capturedName && kickoffIssueId) {
+        const pendingId = pushToast({
+          title: "Attaching URS to kickoff…",
+          body: capturedName,
+          tone: "info",
+          ttlMs: 15000,
+        });
+        try {
+          const isMd = capturedName.toLowerCase().endsWith(".md");
+          const ursText = isMd ? await capturedFile.text() : null;
+
+          await issuesApi.uploadAttachment(capturedCompanyId, kickoffIssueId, capturedFile);
+
+          if (ursText) {
+            try {
+              await artifactsApi.save(capturedProjectId, "urs/main.md", ursText);
+              queryClient.invalidateQueries({ queryKey: ["artifacts", capturedProjectId] });
+            } catch (saveErr) {
+              const noWorkspace = saveErr instanceof ApiError && saveErr.status === 422;
+              if (!noWorkspace) {
+                pushToast({
+                  title: "Could not write URS to Artifacts",
+                  body: "The file is attached to the kickoff issue. You can copy it to your workspace manually.",
+                  tone: "warn",
+                });
+              }
+            }
+          }
+
+          queryClient.invalidateQueries({ queryKey: queryKeys.projects.detail(capturedProjectId) });
+          if (pendingId) dismissToast(pendingId);
+        } catch {
+          if (pendingId) dismissToast(pendingId);
+          pushToast({
+            title: "URS upload failed",
+            body: "Project + kickoff created. You can attach the URS to the kickoff issue manually.",
+            tone: "error",
+          });
+        }
+      }
     } catch {
+      setIsSubmitting(false);
       // surface through createProject.isError
     }
   }
@@ -321,15 +390,11 @@ export function NewProjectDialog() {
             <button
               type="button"
               className="inline-flex items-center gap-1.5 rounded-md border border-dashed border-border px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent/50 transition-colors disabled:opacity-60"
-              disabled={ursLoading}
               onClick={() => ursFileInputRef.current?.click()}
             >
               <FileText className="h-3 w-3" />
-              {ursLoading ? "Parsing…" : "Import URS (.md / .pdf)"}
+              Import URS (.md / .pdf)
             </button>
-          )}
-          {ursParseError && (
-            <span className="text-xs text-destructive">{ursParseError}</span>
           )}
         </div>
 
@@ -507,10 +572,10 @@ export function NewProjectDialog() {
           )}
           <Button
             size="sm"
-            disabled={!name.trim() || createProject.isPending}
+            disabled={!name.trim() || isSubmitting || createProject.isPending}
             onClick={handleSubmit}
           >
-            {createProject.isPending ? "Creating…" : "Create project"}
+            {createProject.isPending || isSubmitting ? "Creating…" : "Create project"}
           </Button>
         </div>
       </DialogContent>

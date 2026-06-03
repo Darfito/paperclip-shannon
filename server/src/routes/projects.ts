@@ -1,4 +1,6 @@
 import { Router, type Request, type Response } from "express";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import type { Db } from "@paperclipai/db";
 import {
   createProjectSchema,
@@ -13,7 +15,7 @@ import {
 import type { WorkspaceRuntimeDesiredState, WorkspaceRuntimeServiceStateMap } from "@paperclipai/shared";
 import { trackProjectCreated } from "@paperclipai/shared/telemetry";
 import { validate } from "../middleware/validate.js";
-import { projectService, logActivity, workspaceOperationService } from "../services/index.js";
+import { agentService, projectService, logActivity, workspaceOperationService, issueService } from "../services/index.js";
 import { conflict } from "../errors.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import {
@@ -40,10 +42,51 @@ const WORKSPACE_CONTROL_OUTPUT_MAX_CHARS = 256 * 1024;
 export function projectRoutes(db: Db) {
   const router = Router();
   const svc = projectService(db);
+  const agentsSvc = agentService(db);
+  const issuesSvc = issueService(db);
   const secretsSvc = secretService(db);
   const workspaceOperations = workspaceOperationService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
   const environmentsSvc = environmentService(db);
+
+  // Find the CEO agent for a company. Falls back to PM, then any non-terminated
+  // agent, so non-Shannon companies still get a sensible auto-assignee.
+  async function findKickoffAssignee(companyId: string): Promise<{ id: string; name: string } | null> {
+    const all = await agentsSvc.list(companyId);
+    const isCeoLike = (a: { name: string | null }) => /\bceo\b|chief executive/i.test(a.name ?? "");
+    const isPmLike = (a: { name: string | null }) => /\bpm\b|product manager/i.test(a.name ?? "");
+    const ceo = all.find(isCeoLike);
+    if (ceo) return { id: ceo.id, name: ceo.name ?? "CEO" };
+    const pm = all.find(isPmLike);
+    if (pm) return { id: pm.id, name: pm.name ?? "PM" };
+    const any = all[0];
+    return any ? { id: any.id, name: any.name ?? "Agent" } : null;
+  }
+
+  function buildKickoffIssueBody(projectName: string, projectDescription: string | null | undefined): string {
+    const desc = (projectDescription ?? "").trim();
+    if (desc.length > 0) {
+      return [
+        `## Project Kickoff: ${projectName}`,
+        ``,
+        desc,
+        ``,
+        `---`,
+        ``,
+        `**CEO action:**`,
+        `1. If the description above contains a structured URS (tables of URS ID / Type / Requirement / Rank), copy it to \`urs/main.md\`.`,
+        `2. Otherwise, run \`foundation--urs-draft\` to structure this brief into \`urs/main.md\`, OR — if URS isn't appropriate — produce a detailed project breakdown (scope, goals, key features, risks, sprint 0 candidates) directly on this issue.`,
+        `3. Post \`[TASK]\` for PM to compile the URS and create Sprint 0 FR issues.`,
+      ].join("\n");
+    }
+    return [
+      `## Project Kickoff: ${projectName}`,
+      ``,
+      `No brief was provided when this project was created.`,
+      ``,
+      `**CEO action:** Run \`foundation--urs-draft\` to propose a starter URS for "${projectName}" based on the project name alone, then post \`[TASK]\` for PM. If URS-style isn't appropriate, post a detailed project breakdown (scope, goals, key features, risks) on this issue and request the human to confirm scope before continuing.`,
+    ].join("\n");
+  }
 
   async function assertProjectEnvironmentSelection(companyId: string, environmentId: string | null | undefined) {
     if (environmentId === undefined || environmentId === null) return;
@@ -153,6 +196,30 @@ export function projectRoutes(db: Db) {
     }
     const hydratedProject = workspace ? await svc.getById(project.id) : project;
 
+    // Auto-create a kickoff issue assigned to the company CEO so the pipeline
+    // begins immediately. Best-effort: a failure here must not roll back the
+    // project create.
+    let kickoffIssueId: string | null = null;
+    let kickoffIssueIdentifier: string | null = null;
+    try {
+      const assignee = await findKickoffAssignee(companyId);
+      if (assignee) {
+        const kickoff = await issuesSvc.create(companyId, {
+          title: `Project Kickoff: ${project.name}`,
+          description: buildKickoffIssueBody(project.name, project.description),
+          projectId: project.id,
+          status: "todo",
+          priority: "high",
+          assigneeAgentId: assignee.id,
+        });
+        kickoffIssueId = kickoff.id;
+        kickoffIssueIdentifier = kickoff.identifier ?? null;
+      }
+    } catch (err) {
+      // Surface to logs but do not fail the project create.
+      console.warn("[projects] auto-kickoff issue creation failed", { projectId: project.id, err: (err as Error).message });
+    }
+
     const actor = getActorInfo(req);
     await logActivity(db, {
       companyId,
@@ -166,13 +233,19 @@ export function projectRoutes(db: Db) {
         name: project.name,
         workspaceId: createdWorkspaceId,
         envKeys: project.env ? Object.keys(project.env).sort() : [],
+        kickoffIssueId,
       },
     });
     const telemetryClient = getTelemetryClient();
     if (telemetryClient) {
       trackProjectCreated(telemetryClient);
     }
-    res.status(201).json(hydratedProject ?? project);
+    const responseBody = hydratedProject ?? project;
+    res.status(201).json({
+      ...responseBody,
+      kickoffIssueId,
+      kickoffIssueIdentifier,
+    });
   });
 
   router.patch("/projects/:id", validate(updateProjectSchema), async (req, res) => {
@@ -624,6 +697,144 @@ export function projectRoutes(db: Db) {
     });
 
     res.json(workspace);
+  });
+
+  // ── Artifacts ──────────────────────────────────────────────────────────────
+
+  const ARTIFACT_PATHS = [
+    "urs/main.md",
+    "urs/index.json",
+    "urs/sprint-plan.md",
+    "urs/clusters.json",
+    "urs/applies-to.json",
+    "urs/main.tex",
+    ".claude/docs/project-state.md",
+    ".claude/docs/foundation/product-mission.md",
+  ] as const;
+
+  const ARTIFACT_GLOB_DIRS = [
+    { dir: "urs/tasks", pattern: /^FR-.+\.json$/i },
+    { dir: "specs", pattern: /\.md$/i },
+  ];
+
+  const ARTIFACT_MAX_BYTES = 512 * 1024;
+
+  function isPathSafe(cwd: string, resolved: string): boolean {
+    const base = path.resolve(cwd);
+    return resolved === base || resolved.startsWith(base + path.sep);
+  }
+
+  router.get("/projects/:id/artifacts", async (req, res) => {
+    const id = req.params.id as string;
+    const project = await svc.getById(id);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    assertCompanyAccess(req, project.companyId);
+
+    const cwd =
+      project.primaryWorkspace?.cwd ??
+      project.codebase?.effectiveLocalFolder ??
+      null;
+    if (!cwd) {
+      res.json({ artifacts: [], cwd: null });
+      return;
+    }
+
+    const artifacts: { path: string; content: string; size: number }[] = [];
+
+    for (const relPath of ARTIFACT_PATHS) {
+      const resolved = path.resolve(cwd, relPath);
+      if (!isPathSafe(cwd, resolved)) continue;
+      try {
+        const stat = await fs.stat(resolved);
+        if (stat.size > ARTIFACT_MAX_BYTES) continue;
+        const content = await fs.readFile(resolved, "utf8");
+        artifacts.push({ path: relPath, content, size: stat.size });
+      } catch {
+        // file doesn't exist — skip
+      }
+    }
+
+    for (const { dir, pattern } of ARTIFACT_GLOB_DIRS) {
+      const dirResolved = path.resolve(cwd, dir);
+      if (!isPathSafe(cwd, dirResolved)) continue;
+      try {
+        const entries = await fs.readdir(dirResolved);
+        for (const entry of entries.sort()) {
+          if (!pattern.test(entry)) continue;
+          const resolved = path.resolve(dirResolved, entry);
+          if (!isPathSafe(cwd, resolved)) continue;
+          const relPath = `${dir}/${entry}`;
+          try {
+            const stat = await fs.stat(resolved);
+            if (stat.size > ARTIFACT_MAX_BYTES) continue;
+            const content = await fs.readFile(resolved, "utf8");
+            artifacts.push({ path: relPath, content, size: stat.size });
+          } catch {
+            // skip
+          }
+        }
+      } catch {
+        // dir doesn't exist — skip
+      }
+    }
+
+    res.json({ artifacts, cwd });
+  });
+
+  router.put("/projects/:id/artifacts", async (req, res) => {
+    const id = req.params.id as string;
+    const project = await svc.getById(id);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    assertCompanyAccess(req, project.companyId);
+
+    const cwd =
+      project.primaryWorkspace?.cwd ??
+      project.codebase?.effectiveLocalFolder ??
+      null;
+    if (!cwd) {
+      res.status(422).json({ error: "Project has no workspace cwd configured" });
+      return;
+    }
+
+    const { path: relPath, content } = req.body as { path?: unknown; content?: unknown };
+    if (typeof relPath !== "string" || relPath.trim().length === 0) {
+      res.status(400).json({ error: "Missing path" });
+      return;
+    }
+    if (typeof content !== "string") {
+      res.status(400).json({ error: "Missing content" });
+      return;
+    }
+
+    const resolved = path.resolve(cwd, relPath.trim());
+    if (!isPathSafe(cwd, resolved)) {
+      res.status(400).json({ error: "Path outside workspace" });
+      return;
+    }
+
+    const knownStaticPaths = new Set<string>(ARTIFACT_PATHS);
+    const isKnown =
+      knownStaticPaths.has(relPath) ||
+      ARTIFACT_GLOB_DIRS.some(({ dir, pattern }) => {
+        if (!relPath.startsWith(`${dir}/`)) return false;
+        return pattern.test(relPath.slice(dir.length + 1));
+      });
+
+    if (!isKnown) {
+      res.status(400).json({ error: "Not an editable artifact path" });
+      return;
+    }
+
+    await fs.mkdir(path.dirname(resolved), { recursive: true });
+    await fs.writeFile(resolved, content, "utf8");
+
+    res.json({ path: relPath, size: Buffer.byteLength(content, "utf8") });
   });
 
   router.delete("/projects/:id", async (req, res) => {

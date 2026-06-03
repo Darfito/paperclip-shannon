@@ -94,10 +94,10 @@ Write the full package to the output directory. Then give a brief summary:
 <output-dir>/
 ├── COMPANY.md
 ├── agents/
-│   ├── ceo/AGENTS.md
-│   ├── pm/AGENTS.md
-│   ├── designer/AGENTS.md
-│   └── swe-lead/AGENTS.md
+│   ├── ceo/{AGENTS.md, SOUL.md}
+│   ├── pm/{AGENTS.md, SOUL.md}
+│   ├── designer/{AGENTS.md, SOUL.md}
+│   └── swe-lead/{AGENTS.md, SOUL.md}
 ├── .paperclip.yaml
 └── README.md
 ```

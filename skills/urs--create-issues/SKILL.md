@@ -48,9 +48,12 @@ Content-Type: application/json
   "title": "{id} — {title}",
   "description": "{text}\n\n---\n@spec: {id}\nRun: foundation--shape-spec --from-urs {id}",
   "pipelineStage": "spec",
+  "status": "todo",
   "assigneeAgentId": "{PAPERCLIP_AGENT_ID}"
 }
 ```
+
+**Important:** `status` must be `"todo"` (not the default `"backlog"`). The server skips the agent wakeup for `backlog` issues — without `"todo"`, PM will never receive the assignment notification.
 
 **Error handling:**
 - If the API call fails (non-2xx): log the error and the FR ID, continue with remaining FRs
@@ -62,7 +65,26 @@ Content-Type: application/json
 
 ---
 
-## Step 4 — Mark kickoff issue shipped
+## Step 4 — Post a system comment on each created FR issue
+
+For each successfully created FR issue, post a comment so PM sees clear instructions the moment it wakes up:
+
+```
+POST {PAPERCLIP_API_URL}/api/issues/{issue_id}/comments
+Authorization: Bearer {PAPERCLIP_API_KEY}
+X-Paperclip-Run-Id: {PAPERCLIP_RUN_ID}
+Content-Type: application/json
+
+{
+  "body": "[System — Pipeline]\nFR issue created from URS. PM, run `foundation--shape-spec --from-urs {fr_id}` to shape the spec brief, then post [PM BRIEF v1].\n\nSWE Lead will be assigned automatically by the debate router after you post [PM BRIEF v1]."
+}
+```
+
+This comment becomes the most recent entry in the thread, so PM sees its instructions immediately on wakeup without needing a separate human prompt.
+
+---
+
+## Step 5 — Mark kickoff issue shipped
 
 Update the kickoff issue pipeline stage:
 
@@ -79,7 +101,7 @@ Content-Type: application/json
 
 ---
 
-## Step 5 — Post summary comment on kickoff issue
+## Step 6 — Post summary comment on kickoff issue
 
 Post a comment on `PAPERCLIP_TASK_ID`:
 
@@ -94,8 +116,7 @@ Created ({n}/{total} Sprint 0 FRs):
 {If any failures:}
 ⚠️ Failed to create issues for: FR-03, FR-04 — see logs above.
 
-Each issue is assigned to PM with pipeline_stage=spec.
-The debate router (Step 13 auto-wakeup) will trigger spec work on each issue automatically.
+Each issue is assigned to PM (status=todo, pipeline_stage=spec). PM will wake up on each issue, run `foundation--shape-spec --from-urs FR-XX`, and post [PM BRIEF v1]. The debate router will then automatically assign SWE Lead for validation.
 Kickoff issue marked shipped.
 ```
 
@@ -106,5 +127,7 @@ Use `POST {PAPERCLIP_API_URL}/api/issues/{PAPERCLIP_TASK_ID}/comments` for the c
 ## Notes
 
 - The `description` field includes `@spec: FR-XX` for URS traceability and `Run: foundation--shape-spec --from-urs FR-XX` so PM knows exactly what to do when the issue wakes up.
-- Because `assigneeAgentId` is set to the PM's own agent ID and `pipelineStage` is `spec`, the debate router's auto-wakeup (Step 13) will fire immediately for each new issue — the PM agent will receive a `[System — Pipeline]` comment and wake up to run `foundation--shape-spec --from-urs FR-XX`.
+- Issues are created with `status: "todo"` (not "backlog"). The server skips the agent wakeup for backlog issues — `"todo"` is required for PM to receive the assignment notification and wake up.
+- Step 4 posts a `[System — Pipeline]` comment on each FR issue so PM sees its exact instructions (run `foundation--shape-spec --from-urs FR-XX`, then post `[PM BRIEF v1]`) the moment it wakes up.
+- After PM posts `[PM BRIEF v1]`, the debate router automatically assigns SWE Lead with a system comment for validation. No manual reassignment needed.
 - If `PAPERCLIP_API_URL` is not available, check for `PAPERCLIP_BASE_URL` as a fallback, then `http://localhost:3100` as a last resort.
